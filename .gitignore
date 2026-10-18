@@ -1,5 +1,5 @@
 # 运行产物 / 调试输出
-hotkey.log
+logs/
 *.log
 
 # 编译中间物

@@ -32,8 +32,9 @@ MiniTasker 的做法是**绕开所有可能卡住的环节**：
  CPU 30.6%   内存 52%   内存 4.2/8.0 GB   [仅显示部分进程 · 本机无法提权]
                        进程 10  线程 112      [搜索框]  [结束任务]
  名称              PID    CPU ↓    内存      线程   状态
- DeepSeek Harness  5412   2.8%    65.7 MB    10
+ chrome.exe        5412   2.8%    65.7 MB    10
  MiniTasker.exe    1536   2.8%    43.7 MB    11    管理员
+ notepad.exe       8376    —       8.2 MB    10    无响应
  [System Process]     0    —        —         8     系统
 ```
 
