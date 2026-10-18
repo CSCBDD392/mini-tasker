@@ -157,8 +157,27 @@ namespace MiniTasker
         /// <summary>当前进程的完整性级别数值（0x2000=High, 0x1000=Medium）。</summary>
         public static uint IntegrityLevel { get; private set; }
 
+        /// <summary>
+        /// 这台机器上「以管理员运行」（runas）到底有没有用。
+        ///
+        /// 内置 Administrator 账户（RID 500）在 FilterAdministratorToken 未开启时，
+        /// UAC 对它完全不起作用——runas 只是把进程重新起一遍，令牌还是 Medium。
+        /// 这种情况下提示用户「以管理员重启」纯属误导，不如直接说明。
+        /// </summary>
+        public static bool RunAsWillElevate { get; private set; }
+
+        /// <summary>当前登录账户是否为内置 Administrator（RID 500）。</summary>
+        public static bool IsBuiltinAdmin { get; private set; }
+
         public static void DetectElevation()
         {
+            try
+            {
+                var id = System.Security.Principal.WindowsIdentity.GetCurrent();
+                IsBuiltinAdmin = id.User != null && id.User.Value.EndsWith("-500");
+            }
+            catch { }
+
             IntPtr token;
             if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, out token)) return;
             try
@@ -183,6 +202,27 @@ namespace MiniTasker
                 }
             }
             finally { CloseHandle(token); }
+
+            // 内置 Administrator 且没开 FilterAdministratorToken → runas 无法提权
+            bool filterAdmin = ReadDword(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System",
+                "FilterAdministratorToken", 0) != 0;
+            RunAsWillElevate = !(IsBuiltinAdmin && !filterAdmin);
+        }
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+        private static extern int RegGetValueW(IntPtr hkey, string subKey, string value, uint flags,
+            out uint type, out uint data, out uint dataSize);
+
+        private static uint ReadDword(string subKey, string name, uint fallback)
+        {
+            try
+            {
+                uint type, data, size;
+                // HKEY_LOCAL_MACHINE = 0x80000002, RRF_RT_REG_DWORD = 0x10
+                int rc = RegGetValueW(new IntPtr(0x80000002), subKey, name, 0x10, out type, out data, out size);
+                return rc == 0 ? data : fallback;
+            }
+            catch { return fallback; }
         }
 
         /// <summary>读一个进程令牌的提权状态。注意 TokenElevation 是 4 字节 uint，用 out 参数重载即可。</summary>
@@ -431,6 +471,45 @@ namespace MiniTasker
                 error = ex.Message;
                 return false;
             }
+        }
+
+        /// <summary>
+        /// 按 PID 结束整棵进程树（先子后父）。不依赖任何列表，
+        /// 供「以管理员重启后收掉旧实例」使用。
+        /// </summary>
+        public static int KillTreeSnapshot(int pid, out string error)
+        {
+            error = null;
+            var children = new Dictionary<int, List<int>>();
+            var prev = new Dictionary<int, ulong>();
+            var all = Snapshot(ref prev, 0);
+            foreach (var p in all)
+            {
+                if (!children.ContainsKey(p.ParentPid)) children[p.ParentPid] = new List<int>();
+                children[p.ParentPid].Add(p.Pid);
+            }
+
+            var order = new List<int>();
+            var stack = new Stack<int>();
+            stack.Push(pid);
+            while (stack.Count > 0)
+            {
+                int cur = stack.Pop();
+                order.Add(cur);
+                List<int> kids;
+                if (children.TryGetValue(cur, out kids))
+                    foreach (var k in kids) stack.Push(k);
+            }
+            order.Reverse();
+
+            int killed = 0;
+            foreach (var id in order)
+            {
+                string err;
+                if (Kill(id, out err)) killed++;
+                else if (id == pid) error = err;
+            }
+            return killed;
         }
 
         /// <summary>结束整棵进程树（先子后父），用于关掉一个带一堆子进程的程序。</summary>

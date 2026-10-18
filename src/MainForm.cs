@@ -295,28 +295,61 @@ namespace MiniTasker
             }
         }
 
+        /// <summary>
+        /// 收进托盘。
+        ///
+        /// 注意：某些 Windows 版本的系统托盘并不显示 NotifyIcon 注册的图标
+        /// （实测本机 Shell_TrayWnd 下没有 ToolbarWindow32，UIA 也读不到任何第三方图标）。
+        /// 所以收起之后不能只剩「托盘」这一条路——右侧会留一个小胶囊，点它就能展开。
+        /// </summary>
         private void HideToTray()
         {
-            // 注意：不要在这里改 ShowInTaskbar。
-            // 改它会重建窗口句柄，之前注册的全局热键会连带失效，
-            // 结果就是「收进托盘之后热键再也唤不回来」。
-            // 只 Hide() 就够了：窗口本来就不在任务栏显示按钮（无边框 + 托盘程序）。
             Hide();
+            ShowMiniPill();
             if (_tray != null)
             {
                 try
                 {
                     string tip = _hotkeyOk
-                        ? "程序还在后台运行。双击托盘图标，或按 " + _hotkeyLabel + " 可以随时叫回来。"
-                        : "程序还在后台运行。双击托盘图标可以随时叫回来。";
-                    _tray.ShowBalloonTip(3000, "已收进托盘", tip, ToolTipIcon.Info);
+                        ? "已收起。点右边的「显示」小条，或按 " + _hotkeyLabel + " 可以再打开。"
+                        : "已收起。点屏幕右侧的「显示」小条可以再打开。";
+                    _tray.ShowBalloonTip(3000, "已收起", tip, ToolTipIcon.Info);
                 }
                 catch { }
             }
         }
 
+        // ---------------------------------------------------------------- 收起后的胶囊
+        private Rectangle _pillRect;
+        private bool _pillVisible;
+
+        private void ShowMiniPill()
+        {
+            if (_pillForm == null) _pillForm = new PillForm(this);
+            var wa = Screen.PrimaryScreen.WorkingArea;
+            int w = 132, h = 30;
+            _pillRect = new Rectangle(wa.Right - w - 14, wa.Top + 16, w, h);
+            _pillForm.ShowAt(_pillRect);
+            _pillVisible = true;
+        }
+
+        private void HideMiniPill()
+        {
+            if (_pillForm != null) _pillForm.HidePill();
+            _pillVisible = false;
+        }
+
+        internal void PillClicked()
+        {
+            HideMiniPill();
+            RestoreFromTray();
+        }
+
+        private PillForm _pillForm;
+
         private void RestoreFromTray()
         {
+            HideMiniPill();
             Show();
             if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
             Activate();
@@ -332,6 +365,7 @@ namespace MiniTasker
             _timer.Stop();
             try { UnregisterHotKey(Handle, HOTKEY_SHOW); } catch { }
             if (_tray != null) { _tray.Visible = false; _tray.Dispose(); _tray = null; }
+            if (_pillForm != null) { _pillForm.Close(); _pillForm.Dispose(); _pillForm = null; }
             _tipForm.Dispose();
             Close();
         }
@@ -506,13 +540,23 @@ namespace MiniTasker
             if (!ProcessApi.IsElevated)
             {
                 var btn = ElevateRect();
-                bool hover = btn.Contains(PointToClient(Cursor.Position));
-                using (var b = new SolidBrush(hover ? Color.FromArgb(255, 70, 60, 30) : Color.FromArgb(255, 46, 40, 26)))
+                bool canRunAs = ProcessApi.RunAsWillElevate;
+                bool hover = canRunAs && btn.Contains(PointToClient(Cursor.Position));
+
+                using (var b = new SolidBrush(hover ? Color.FromArgb(255, 70, 60, 30) : Color.FromArgb(255, 42, 38, 28)))
                 using (var path = Rounded(btn, 7)) g.FillPath(b, path);
-                using (var f = new Font("Microsoft YaHei UI", 8.8f))
+
+                using (var f = new Font("Microsoft YaHei UI", 8.6f))
                 using (var tb = new SolidBrush(Warn))
-                    g.DrawString("仅显示部分进程 · 以管理员重启", f, tb, btn.X + 9, btn.Y + 4);
-                _tip.Register(btn, "非管理员权限下只能看到与自己同级别的进程。点这里以管理员身份重新启动，可看到全部进程。");
+                {
+                    string text = canRunAs ? "仅显示部分进程 · 以管理员重启" : "仅显示部分进程 · 本机无法提权";
+                    g.DrawString(text, f, tb, btn.X + 9, btn.Y + 4);
+                }
+
+                _tip.Register(btn, canRunAs
+                    ? "非管理员权限下只能看到与自己同级别的进程。点这里以管理员身份重新启动。"
+                    : "本机登录的是内置 Administrator 账户且未启用 FilterAdministratorToken，UAC 对它不生效，"
+                      + "「以管理员运行」只会重开进程、权限不变。要看到全部进程，需要用另一个管理员账户登录。");
             }
 
             if (_hungCount > 0)
@@ -757,7 +801,7 @@ namespace MiniTasker
                 left = ClipText(g, left, f, ClientSize.Width - 250);
                 g.DrawString(left, f, b, 16, y + 3);
 
-                string right = _hotkeyOk ? _hotkeyLabel + " 呼出" : "托盘图标呼出";
+                string right = _hotkeyOk ? _hotkeyLabel + " 呼出" : "收起后点屏幕右侧「显示」条";
                 var s = g.MeasureString(right, f);
                 g.DrawString(right, f, b, ClientSize.Width - s.Width - 16, y + 3);
             }
@@ -859,7 +903,27 @@ namespace MiniTasker
             if (MinRect().Contains(e.Location)) { HideToTray(); return; }
             if (CloseRect().Contains(e.Location)) { HideToTray(); return; }
 
-            if (!ProcessApi.IsElevated && ElevateRect().Contains(e.Location)) { RestartAsAdmin(); return; }
+            if (!ProcessApi.IsElevated && ElevateRect().Contains(e.Location))
+            {
+                if (ProcessApi.RunAsWillElevate)
+                {
+                    RestartAsAdmin();
+                }
+                else
+                {
+                    MessageBox.Show(this,
+                        "本机无法通过「以管理员身份运行」提权。\n\n"
+                        + "原因：当前登录的是内置 Administrator 账户，且系统没有启用\n"
+                        + "FilterAdministratorToken（UAC 对该账户不生效）。这种情况下\n"
+                        + "「以管理员运行」只会把程序重新启动一遍，权限级别不变。\n\n"
+                        + "如果想看到全部进程，有两种办法：\n"
+                        + "  1. 启用 FilterAdministratorToken 后重新登录（需要改注册表并重启）\n"
+                        + "  2. 用另一个「管理员」组的普通账户登录\n\n"
+                        + "注意：这两种做法都会改变系统的 UAC 行为，请确认后再操作。",
+                        "无法提权", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                return;
+            }
 
             if (KillRect().Contains(e.Location)) { KillSelected(); return; }
 
@@ -1002,9 +1066,10 @@ namespace MiniTasker
             if (!ProcessApi.Kill(p.Pid, out error))
             {
                 var r2 = MessageBox.Show(this,
-                    "结束失败：" + error + "\n\n可能是权限不足（系统进程/其他用户）。\n要用管理员权限重开一次再试吗？",
+                    "结束失败：" + error + "\n\n可能是权限不足（系统进程 / 其他用户）。\n"
+                    + "以管理员身份重新启动，启动后会自动再试一次结束这个进程。要现在重启吗？",
                     "结束进程失败", MessageBoxButtons.YesNo, MessageBoxIcon.Error);
-                if (r2 == DialogResult.Yes) RestartAsAdmin();
+                if (r2 == DialogResult.Yes) RestartAsAdmin(p.Pid, false);
                 return;
             }
 
@@ -1012,19 +1077,94 @@ namespace MiniTasker
             Sample();
         }
 
-        private void RestartAsAdmin()
+        /// <summary>
+        /// 以管理员身份重新启动。
+        ///
+        /// 这里有两个坑，都会表现成「点了没反应」：
+        /// 1. 单实例互斥锁——新进程起来时旧进程还没退出，会被挡住然后自己退出，
+        ///    结果旧进程关了、新进程也没了。所以必须先退出再启动。
+        /// 2. 用户点了 UAC 的「否」会抛 Win32Exception(1223)，旧代码用空的 catch 吞掉，
+        ///    界面上什么都看不到。现在把结果明确告诉用户。
+        /// </summary>
+        private void RestartAsAdmin(int pidToKill = -1, bool killTree = false)
         {
+            string exe = Application.ExecutablePath;
+            string args = (pidToKill > 0 ? "--kill " + pidToKill + (killTree ? " --tree" : "") + " --elevated" : "--elevated");
+
+            // 先释放单实例锁
+            ReleaseSingleInstance();
+            _reallyClosing = true;
+            _timer.Stop();
+            if (_tray != null) { _tray.Visible = false; _tray.Dispose(); _tray = null; }
+            Hide();
+
             try
             {
-                var psi = new System.Diagnostics.ProcessStartInfo(Application.ExecutablePath)
+                var psi = new System.Diagnostics.ProcessStartInfo(exe, args)
                 {
                     UseShellExecute = true,
                     Verb = "runas",
+                    WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory,
                 };
                 System.Diagnostics.Process.Start(psi);
-                RealExit();
             }
-            catch { /* 用户取消了 UAC */ }
+            catch (System.ComponentModel.Win32Exception ex)
+            {
+                // 1223 = 用户在 UAC 提示上点了「否」
+                string why = ex.NativeErrorCode == 1223
+                    ? "你取消了 UAC 提示，没有以管理员身份重启。"
+                    : "无法以管理员身份启动：" + ex.Message;
+                ShowBanner(why);
+                // 取消提权就回到原来的窗口，别让程序直接消失了
+                if (_tray == null) BuildTray();
+                Show();
+                _timer.Start();
+                return;
+            }
+            catch (Exception ex)
+            {
+                ShowBanner("重启失败：" + ex.Message);
+                if (_tray == null) BuildTray();
+                Show();
+                _timer.Start();
+                return;
+            }
+
+            Close();
+        }
+
+        /// <summary>程序内的一条临时提示（画在标题下面），几秒后自动消失。</summary>
+        private string _banner;
+        private DateTime _bannerUntil = DateTime.MinValue;
+
+        private void ShowBanner(string text)
+        {
+            _banner = text;
+            _bannerUntil = DateTime.Now.AddSeconds(6);
+            Invalidate();
+        }
+
+        private void ReleaseSingleInstance()
+        {
+            try
+            {
+                if (_mutex != null)
+                {
+                    try { _mutex.ReleaseMutex(); } catch { }
+                    _mutex.Dispose();
+                    _mutex = null;
+                }
+            }
+            catch { }
+        }
+
+        private System.Threading.Mutex _mutex;
+
+        /// <summary>由 Program 传入的单实例锁；「以管理员重启」时要先释放它。</summary>
+        internal System.Threading.Mutex HoldMutex
+        {
+            get { return _mutex; }
+            set { _mutex = value; }
         }
 
         // ---------------------------------------------------------------- 提示气泡
@@ -1045,6 +1185,97 @@ namespace MiniTasker
                     if (kv.Key.Contains(p)) return kv.Value;
                 return null;
             }
+        }
+    }
+
+    /// <summary>
+    /// 收起后留在屏幕上的小胶囊。点它就展开主窗口。
+    ///
+    /// 为什么需要它：不是所有 Windows 版本都会显示 NotifyIcon 注册的托盘图标
+    /// （本机实测 Shell_TrayWnd 下连 ToolbarWindow32 都没有，UIA 也读不到第三方图标）。
+    /// 如果没有这个胶囊，窗口一收起来用户就再也找不回来，只能结束进程重开。
+    /// </summary>
+    [System.ComponentModel.DesignerCategory("Code")]
+    internal sealed class PillForm : Form
+    {
+        private readonly MainForm _owner;
+        private bool _hover;
+
+        public PillForm(MainForm owner)
+        {
+            _owner = owner;
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            TopMost = true;
+            BackColor = Color.FromArgb(255, 24, 26, 32);
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
+                     | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            Cursor = Cursors.Hand;
+        }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        [System.Runtime.InteropServices.DllImport("Gdi32.dll")]
+        private static extern IntPtr CreateRoundRectRgn(int l, int t, int r, int b, int w, int h);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool redraw);
+
+        public void ShowAt(Rectangle rect)
+        {
+            Bounds = rect;
+            if (!Visible) Show();
+            try
+            {
+                IntPtr rgn = CreateRoundRectRgn(0, 0, Width + 1, Height + 1, 15, 15);
+                SetWindowRgn(Handle, rgn, true);
+            }
+            catch { }
+            TopMost = true;
+            Invalidate();
+        }
+
+        public void HidePill()
+        {
+            Hide();
+        }
+
+        protected override void OnMouseEnter(EventArgs e)
+        {
+            _hover = true;
+            Invalidate();
+            base.OnMouseEnter(e);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            _hover = false;
+            Invalidate();
+            base.OnMouseLeave(e);
+        }
+
+        protected override void OnMouseClick(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left) _owner.PillClicked();
+            base.OnMouseClick(e);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+            using (var bg = new SolidBrush(_hover ? Color.FromArgb(255, 38, 42, 52) : Color.FromArgb(255, 26, 29, 36)))
+                g.FillRectangle(bg, ClientRectangle);
+            using (var pen = new Pen(Color.FromArgb(_hover ? 120 : 60, 255, 255, 255)))
+                g.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+
+            using (var f = new Font("Microsoft YaHei UI", 9.5f))
+            using (var b = new SolidBrush(Color.FromArgb(255, 220, 226, 236)))
+            using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                g.DrawString("▣  显示任务管理器", f, b, new RectangleF(0, 0, Width, Height), sf);
         }
     }
 
