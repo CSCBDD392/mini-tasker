@@ -163,7 +163,21 @@ namespace MiniTasker
                      | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
 
             var wa = Screen.PrimaryScreen.WorkingArea;
-            Location = new Point(wa.X + (wa.Width - Width) / 2, wa.Y + (wa.Height - Height) / 2);
+
+            // 默认位置：水平居中、垂直居中偏上。
+            // 不能直接用屏幕正中——桌面歌词条固定在「顶部居中、宽 760」，居中放会压住它。
+            // 上边界压到 y=180 以上（歌词条最高约 148 + 顶边距），并保证底部不出屏。
+            int posY = wa.Y + (wa.Height - Height) / 2;
+            if (posY < wa.Y + 180) posY = wa.Y + 180;
+            if (posY + Height > wa.Bottom - 10) posY = wa.Bottom - Height - 10;
+            if (posY < wa.Y) posY = wa.Y;
+
+            // 右侧留出 170px 给「收起胶囊 / 别的常驻小窗」，避免主窗口压住它们的落点
+            int maxW = wa.Width - 170;
+            if (Width > maxW) Width = maxW;
+
+            int posX = wa.X + (wa.Width - Width) / 2;
+            Location = new Point(posX, posY);
 
             // 让窗口不出现在任务栏：用 WS_EX_TOOLWINDOW，而不是 ShowInTaskbar。
             // ShowInTaskbar 一改就会重建句柄，全局热键随之失效（踩过）。
@@ -328,9 +342,73 @@ namespace MiniTasker
             if (_pillForm == null) _pillForm = new PillForm(this);
             var wa = Screen.PrimaryScreen.WorkingArea;
             int w = 132, h = 30;
-            _pillRect = new Rectangle(wa.Right - w - 14, wa.Top + 16, w, h);
+
+            // 放在屏幕右侧、垂直居中的位置（不是右上角）：
+            // 桌面歌词那个程序的收起胶囊固定在右上角，两个都收起来时用同一块地方会互相盖住。
+            // 若这个位置被别的窗口占着，就贴着右边缘往下找一个空位。
+            int x = wa.Right - w - 14;
+            int y = wa.Top + Math.Max(60, (wa.Height - h) / 2);
+            var chosen = new Rectangle(x, y, w, h);
+
+            if (!IsSpotFree(chosen))
+            {
+                bool found = false;
+                for (int yy = wa.Top + 10; yy <= wa.Bottom - h - 10; yy += h + 8)
+                {
+                    var cand = new Rectangle(x, yy, w, h);
+                    if (IsSpotFree(cand)) { chosen = cand; found = true; break; }
+                }
+                if (!found) chosen = new Rectangle(x, y, w, h);   // 全被占就回默认位置
+            }
+
+            _pillRect = chosen;
             _pillForm.ShowAt(_pillRect);
             _pillVisible = true;
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr WindowFromPoint(POINT pt);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct POINT { public int X; public int Y; }
+
+        /// <summary>
+        /// 这个矩形是否「空」：取四角 + 中心共 5 个采样点，任何一点底下是别的程序窗口就算被占。
+        /// 只看中心点不够——中心可能落在两个窗口之间的缝里，但边缘仍然被压住。
+        /// </summary>
+        private bool IsSpotFree(Rectangle r)
+        {
+            var pts = new[]
+            {
+                new POINT { X = r.Left + 4,  Y = r.Top + 4 },
+                new POINT { X = r.Right - 4, Y = r.Top + 4 },
+                new POINT { X = r.Left + 4,  Y = r.Bottom - 4 },
+                new POINT { X = r.Right - 4, Y = r.Bottom - 4 },
+                new POINT { X = r.Left + r.Width / 2, Y = r.Top + r.Height / 2 },
+            };
+
+            foreach (var pt in pts)
+            {
+                IntPtr hw = WindowFromPoint(pt);
+                if (hw == IntPtr.Zero) continue;
+                IntPtr root = GetAncestor(hw, 2);   // GA_ROOT
+                if (root == IntPtr.Zero || root == Handle) continue;
+
+                var cls = new System.Text.StringBuilder(128);
+                GetClassName(root, cls, cls.Capacity);
+                string c = cls.ToString();
+                if (c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd" || c == "Shell_SecondaryTrayWnd")
+                    continue;   // 桌面/任务栏算背景
+
+                return false;
+            }
+            return true;
         }
 
         private void HideMiniPill()
