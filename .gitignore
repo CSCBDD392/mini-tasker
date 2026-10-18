@@ -1,0 +1,16 @@
+# 运行产物 / 调试输出
+hotkey.log
+*.log
+
+# 编译中间物
+obj/
+*.pdb
+
+# 系统
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 编辑器
+.vscode/
+.idea/
